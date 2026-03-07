@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URI;
@@ -70,7 +71,10 @@ public class Http3Client {
             .build();
 
         final byte[] connId = Quiche.newConnectionId();
-        final Connection conn = Quiche.connect(uri.getHost(), connId, config);
+        final DatagramSocket socket = new DatagramSocket(0);
+        final InetSocketAddress localAddr = (InetSocketAddress) socket.getLocalSocketAddress();
+        final InetSocketAddress peerAddr = new InetSocketAddress(address, port);
+        final Connection conn = Quiche.connect(uri.getHost(), connId, config, localAddr, peerAddr);
 
         int len = 0;
         final byte[] buffer = new byte[MAX_DATAGRAM_SIZE];
@@ -83,7 +87,6 @@ public class Http3Client {
         System.out.println("> handshake size: " + len);
 
         final DatagramPacket handshakePacket = new DatagramPacket(buffer, len, address, port);
-        final DatagramSocket socket = new DatagramSocket(0);
         socket.setSoTimeout(200);
         socket.send(handshakePacket);
 
@@ -105,7 +108,8 @@ public class Http3Client {
 
                     // xxx(okachaiev): if we extend `recv` API to deal with optional buf len,
                     // we could avoid Arrays.copy here
-                    final int read = conn.recv(Arrays.copyOfRange(packet.getData(), packet.getOffset(), recvBytes));
+                    final InetSocketAddress from = (InetSocketAddress) packet.getSocketAddress();
+                    final int read = conn.recv(Arrays.copyOfRange(packet.getData(), packet.getOffset(), recvBytes), from, localAddr);
                     if (read < 0 && read != Quiche.ErrorCode.DONE) {
                         System.out.println("> conn.recv failed " + read);
 

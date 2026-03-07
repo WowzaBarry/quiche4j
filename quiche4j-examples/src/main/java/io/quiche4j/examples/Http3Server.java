@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
@@ -222,7 +223,9 @@ public class Http3Server {
                     }
                     sourceConnId = destinationConnId;
 
-                    final Connection conn = Quiche.accept(sourceConnId, odcid, config);
+                    final InetSocketAddress localAddr = (InetSocketAddress) socket.getLocalSocketAddress();
+                    final InetSocketAddress peerAddr = new InetSocketAddress(packet.getAddress(), packet.getPort());
+                    final Connection conn = Quiche.accept(sourceConnId, odcid, config, localAddr, peerAddr);
 
                     System.out.println("> new connection " + Utils.asHex(sourceConnId));
 
@@ -234,7 +237,9 @@ public class Http3Server {
 
                 // POTENTIALLY COALESCED PACKETS
                 final Connection conn = client.connection();
-                final int read = conn.recv(packetBuf);
+                final InetSocketAddress recvFrom = new InetSocketAddress(packet.getAddress(), packet.getPort());
+                final InetSocketAddress recvTo = (InetSocketAddress) socket.getLocalSocketAddress();
+                final int read = conn.recv(packetBuf, recvFrom, recvTo);
                 if (read < 0 && read != Quiche.ErrorCode.DONE) {
                     System.out.println("> recv failed " + read);
                     break;

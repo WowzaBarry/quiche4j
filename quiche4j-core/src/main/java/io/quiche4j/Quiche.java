@@ -1,5 +1,6 @@
 package io.quiche4j;
 
+import java.net.InetSocketAddress;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -103,36 +104,47 @@ public final class Quiche {
          * Error in congestion control.
          */
         public static final short CONGESTION_CONTROL = -14;
+
+        /**
+         * The specified stream was stopped by the peer.
+         */
+        public static final short STREAM_STOPPED = -15;
+
+        /**
+         * The specified stream was reset by the peer.
+         */
+        public static final short STREAM_RESET = -16;
+
+        /**
+         * Too many identifiers were provided.
+         */
+        public static final short ID_LIMIT = -17;
+
+        /**
+         * Not enough available identifiers.
+         */
+        public static final short OUT_OF_IDENTIFIERS = -18;
+
+        /**
+         * Error in key update.
+         */
+        public static final short KEY_UPDATE = -19;
+
+        /**
+         * The peer sent more data in CRYPTO frames than we can buffer.
+         */
+        public static final short CRYPTO_BUFFER_EXCEEDED = -20;
     }
 
     /**
-     * Supported QUIC version:
-     * https://tools.ietf.org/html/draft-ietf-quic-transport-27
-     *
-     * <p>Note that the older ones might not be fully supported.
+     * QUIC v1 (RFC 9000).
      */
-    public static final int PROTOCOL_VERSION_DRAFT27 = 0xff00_001b;
-
-    /**
-     * Supported QUIC version:
-     * https://tools.ietf.org/html/draft-ietf-quic-transport-28
-     *
-     * <p>Note that the older ones might not be fully supported.
-     */
-    public static final int PROTOCOL_VERSION_DRAFT28 = 0xff00_001c;
-
-    /**
-     * Supported QUIC version:
-     * https://tools.ietf.org/html/draft-ietf-quic-transport-29
-     *
-     * <p>Note that the older ones might not be fully supported.
-     */
-    public static final int PROTOCOL_VERSION_DRAFT29 = 0xff00_001d;
+    public static final int PROTOCOL_VERSION_V1 = 0x0000_0001;
 
     /**
      * The current QUIC wire version.
      */
-    public static final int PROTOCOL_VERSION = PROTOCOL_VERSION_DRAFT29;
+    public static final int PROTOCOL_VERSION = PROTOCOL_VERSION_V1;
 
     /**
      * The stream's side to shutdown.
@@ -255,9 +267,11 @@ public final class Quiche {
      * 
      * @throws ConnectionFailureException
      */
-    public static final Connection accept(byte[] sourceConnId, byte[] originalDestinationConnId, Config config)
-            throws ConnectionFailureException {
-        final long ptr = Native.quiche_accept(sourceConnId, originalDestinationConnId, config.getPointer());
+    public static final Connection accept(byte[] sourceConnId, byte[] originalDestinationConnId, Config config,
+            InetSocketAddress localAddr, InetSocketAddress peerAddr) throws ConnectionFailureException {
+        final long ptr = Native.quiche_accept(sourceConnId, originalDestinationConnId, config.getPointer(),
+            localAddr.getAddress().getAddress(), localAddr.getPort(),
+            peerAddr.getAddress().getAddress(), peerAddr.getPort());
         if (ptr <= ErrorCode.SUCCESS) {
             throw new ConnectionFailureException(ptr);
         }
@@ -270,12 +284,14 @@ public final class Quiche {
      * The {@code sourceConnId} parameter is used as the connection's source
      * connection ID, while the optional {@code serverName} parameter is used to
      * verify the peer's certificate.
-     * 
+     *
      * @throws ConnectionFailureException
      */
-    public static final Connection connect(String serverName, byte[] connId, Config config)
-            throws ConnectionFailureException {
-        final long ptr = Native.quiche_connect(serverName, connId, config.getPointer());
+    public static final Connection connect(String serverName, byte[] connId, Config config,
+            InetSocketAddress localAddr, InetSocketAddress peerAddr) throws ConnectionFailureException {
+        final long ptr = Native.quiche_connect(serverName, connId, config.getPointer(),
+            localAddr.getAddress().getAddress(), localAddr.getPort(),
+            peerAddr.getAddress().getAddress(), peerAddr.getPort());
         if (ptr <= ErrorCode.SUCCESS) {
             throw new ConnectionFailureException(ptr);
         }

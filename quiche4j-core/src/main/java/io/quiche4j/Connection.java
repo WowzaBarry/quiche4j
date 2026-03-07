@@ -1,5 +1,6 @@
 package io.quiche4j;
 
+import java.net.InetSocketAddress;
 import java.util.Iterator;
 
 import io.quiche4j.Quiche.Shutdown;
@@ -43,8 +44,10 @@ public class Connection {
      *     }
      * </pre>
      */
-    public final int recv(byte[] buf) {
-        return Native.quiche_conn_recv(getPointer(), buf);
+    public final int recv(byte[] buf, InetSocketAddress from, InetSocketAddress to) {
+        return Native.quiche_conn_recv(getPointer(), buf,
+            from.getAddress().getAddress(), from.getPort(),
+            to.getAddress().getAddress(), to.getPort());
     }
 
     /**
