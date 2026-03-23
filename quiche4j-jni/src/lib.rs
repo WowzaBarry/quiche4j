@@ -1,5 +1,7 @@
 extern crate jni;
 
+mod wt;
+
 use env_logger::{Builder, Target};
 use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JValue, ReleaseMode};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jobject, jobjectArray};
@@ -8,6 +10,8 @@ use quiche::{h3, Config, Connection, ConnectionId, Error, Header, RecvInfo, Stre
 use quiche::h3::NameValue;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::slice;
+
+use wt::WtServer;
 
 type JNIResult<T> = Result<T, jni::errors::Error>;
 
@@ -1193,5 +1197,231 @@ pub extern "system" fn Java_io_quiche4j_Native_quiche_1header_1from_1slice(
             .unwrap();
         }
         None => {}
+    }
+}
+
+// --- H3 Config extensions for WebTransport ---
+
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_http3_Http3Native_quiche_1h3_1config_1free(
+    _env: JNIEnv,
+    _class: JClass,
+    h3_config_ptr: jlong,
+) {
+    unsafe { Box::from_raw(h3_config_ptr as *mut h3::Config) };
+}
+
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_http3_Http3Native_quiche_1h3_1config_1enable_1extended_1connect(
+    _env: JNIEnv,
+    _class: JClass,
+    h3_config_ptr: jlong,
+    enabled: jboolean,
+) {
+    let h3_config = unsafe { &mut *(h3_config_ptr as *mut h3::Config) };
+    h3_config.enable_extended_connect(enabled != 0);
+}
+
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_http3_Http3Native_quiche_1h3_1config_1set_1additional_1settings(
+    mut env: JNIEnv,
+    _class: JClass,
+    h3_config_ptr: jlong,
+    java_keys: jbyteArray,
+    java_values: jbyteArray,
+) -> jint {
+    let h3_config = unsafe { &mut *(h3_config_ptr as *mut h3::Config) };
+    let keys_ref = unsafe { JByteArray::from_raw(java_keys) };
+    let vals_ref = unsafe { JByteArray::from_raw(java_values) };
+    let keys_bytes = env.convert_byte_array(&keys_ref).unwrap();
+    let vals_bytes = env.convert_byte_array(&vals_ref).unwrap();
+    std::mem::forget(keys_ref);
+    std::mem::forget(vals_ref);
+
+    // Keys and values are packed as big-endian u64 arrays
+    let count = keys_bytes.len() / 8;
+    let mut settings = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = i * 8;
+        let key = u64::from_be_bytes(keys_bytes[off..off + 8].try_into().unwrap());
+        let val = u64::from_be_bytes(vals_bytes[off..off + 8].try_into().unwrap());
+        settings.push((key, val));
+    }
+    match h3_config.set_additional_settings(settings) {
+        Ok(_) => 0 as jint,
+        Err(_) => -1 as jint,
+    }
+}
+
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_http3_Http3Native_quiche_1h3_1extended_1connect_1enabled_1by_1peer(
+    _env: JNIEnv,
+    _class: JClass,
+    h3_conn_ptr: jlong,
+) -> jboolean {
+    let h3_conn = unsafe { &*(h3_conn_ptr as *mut h3::Connection) };
+    h3_conn.extended_connect_enabled_by_peer() as jboolean
+}
+
+// --- WebTransport JNI bindings ---
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1new(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jlong {
+    let wt = WtServer::new();
+    Box::into_raw(Box::new(wt)) as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1free(
+    _env: JNIEnv,
+    _class: JClass,
+    wt_ptr: jlong,
+) {
+    unsafe { Box::from_raw(wt_ptr as *mut WtServer) };
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1poll(
+    mut env: JNIEnv,
+    _class: JClass,
+    wt_ptr: jlong,
+    h3_conn_ptr: jlong,
+    conn_ptr: jlong,
+    listener: jobject,
+) -> jint {
+    let wt = unsafe { &mut *(wt_ptr as *mut WtServer) };
+    let h3_conn = unsafe { &mut *(h3_conn_ptr as *mut h3::Connection) };
+    let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
+    let listener_ref = unsafe { JObject::from_raw(listener) };
+
+    let events = wt.poll(conn, h3_conn);
+    let count = events.len() as jint;
+
+    for evt in events {
+        match evt {
+            wt::WtEvent::NewSession { session_id, path } => {
+                let path_jstr = env.new_string(&path).unwrap();
+                let _ = env.call_method(
+                    &listener_ref,
+                    "onNewSession",
+                    "(JLjava/lang/String;)V",
+                    &[
+                        JValue::Long(session_id as jlong),
+                        JValue::Object(&path_jstr),
+                    ],
+                );
+            }
+            wt::WtEvent::NewStream { session_id, stream_id, bidi } => {
+                let _ = env.call_method(
+                    &listener_ref,
+                    "onNewStream",
+                    "(JJZ)V",
+                    &[
+                        JValue::Long(session_id as jlong),
+                        JValue::Long(stream_id as jlong),
+                        JValue::Bool(bidi as jboolean),
+                    ],
+                );
+            }
+            wt::WtEvent::Data { stream_id } => {
+                call_on_data(&mut env, &listener_ref, stream_id).unwrap();
+            }
+            wt::WtEvent::Finished { stream_id } => {
+                call_on_finished(&mut env, &listener_ref, stream_id).unwrap();
+            }
+            wt::WtEvent::H3Headers { stream_id, headers, has_body } => {
+                call_on_headers(&mut env, &listener_ref, stream_id, headers, has_body).unwrap();
+            }
+            wt::WtEvent::H3Data { stream_id } => {
+                call_on_data(&mut env, &listener_ref, stream_id).unwrap();
+            }
+            wt::WtEvent::H3Finished { stream_id } => {
+                call_on_finished(&mut env, &listener_ref, stream_id).unwrap();
+            }
+        }
+    }
+
+    count
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1open_1uni_1stream(
+    _env: JNIEnv,
+    _class: JClass,
+    wt_ptr: jlong,
+    conn_ptr: jlong,
+    session_id: jlong,
+) -> jlong {
+    let wt = unsafe { &mut *(wt_ptr as *mut WtServer) };
+    let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
+    match wt.open_uni_stream(conn, session_id as u64) {
+        Ok(stream_id) => stream_id as jlong,
+        Err(_) => -1 as jlong,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1open_1bidi_1stream(
+    _env: JNIEnv,
+    _class: JClass,
+    wt_ptr: jlong,
+    conn_ptr: jlong,
+    session_id: jlong,
+) -> jlong {
+    let wt = unsafe { &mut *(wt_ptr as *mut WtServer) };
+    let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
+    match wt.open_bidi_stream(conn, session_id as u64) {
+        Ok(stream_id) => stream_id as jlong,
+        Err(_) => -1 as jlong,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1stream_1send(
+    mut env: JNIEnv,
+    _class: JClass,
+    conn_ptr: jlong,
+    stream_id: jlong,
+    java_buf: jbyteArray,
+    fin: jboolean,
+) -> jlong {
+    let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
+    let buf_ref = unsafe { JByteArray::from_raw(java_buf) };
+    let buf: Vec<u8> = env.convert_byte_array(&buf_ref).unwrap();
+    std::mem::forget(buf_ref);
+    match conn.stream_send(stream_id as u64, &buf, fin != 0) {
+        Ok(v) => v as jlong,
+        Err(e) => error_to_c(e) as jlong,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1stream_1recv(
+    mut env: JNIEnv,
+    _class: JClass,
+    conn_ptr: jlong,
+    stream_id: jlong,
+    java_buf: jbyteArray,
+) -> jint {
+    let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
+    let buf_ref = unsafe { JByteArray::from_raw(java_buf) };
+    let buf_len = env.get_array_length(&buf_ref).unwrap() as usize;
+    let mut buf = vec![0u8; buf_len];
+    match conn.stream_recv(stream_id as u64, &mut buf) {
+        Ok((out_len, _fin)) => {
+            env.set_byte_array_region(&buf_ref, 0, unsafe {
+                slice::from_raw_parts(buf.as_ptr() as *const i8, out_len)
+            })
+            .unwrap();
+            out_len as jint
+        }
+        Err(e) => error_to_c(e),
     }
 }

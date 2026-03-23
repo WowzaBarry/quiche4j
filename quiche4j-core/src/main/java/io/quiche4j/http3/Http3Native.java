@@ -35,4 +35,10 @@ public class Http3Native {
 
 	public final static native long quiche_h3_conn_poll(long h3_conn_ptr, long conn_ptr, Http3EventListener listener);
 
+	public final static native void quiche_h3_config_enable_extended_connect(long h3_config_ptr, boolean enabled);
+
+	public final static native int quiche_h3_config_set_additional_settings(long h3_config_ptr, byte[] keys, byte[] values);
+
+	public final static native boolean quiche_h3_extended_connect_enabled_by_peer(long h3_conn_ptr);
+
 }

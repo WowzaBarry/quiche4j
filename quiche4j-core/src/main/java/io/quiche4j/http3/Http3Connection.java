@@ -135,11 +135,19 @@ public final class Http3Connection {
     }
 
     /**
+     * Returns whether the peer enabled Extended CONNECT support (RFC 9220).
+     * Always returns false until peer SETTINGS have been processed via {@link #poll}.
+     */
+    public boolean isExtendedConnectEnabledByPeer() {
+        return Http3Native.quiche_h3_extended_connect_enabled_by_peer(getPointer());
+    }
+
+    /**
      * Returns the pointer to a counterpart native object.
-     * 
+     *
      * <p>Intended to be used only by the library code.
      */
-    private final long getPointer() {
+    final long getPointer() {
         return this.ptr;
     }
 
