@@ -85,10 +85,15 @@ public class Http3NettyClient {
         ChannelHandlerContext ctx;
         final Connection connection;
         final ChannelPromise handshakePromise;
+        final InetSocketAddress localAddr;
+        final InetSocketAddress peerAddr;
 
-        QuicHandshakeHandler(Connection connection, ChannelPromise handshakePromise) {
+        QuicHandshakeHandler(Connection connection, ChannelPromise handshakePromise,
+                InetSocketAddress localAddr, InetSocketAddress peerAddr) {
             this.connection = connection;
             this.handshakePromise = handshakePromise;
+            this.localAddr = localAddr;
+            this.peerAddr = peerAddr;
         }
 
         @Override
@@ -121,7 +126,7 @@ public class Http3NettyClient {
             try {
                 final byte[] buf = new byte[buffer.readableBytes()];
                 buffer.readBytes(buf);
-                this.connection.recv(buf);
+                this.connection.recv(buf, this.peerAddr, this.localAddr);
                 if (this.connection.isClosed()) {
                     this.handshakePromise.setFailure(HANDSHAKE_FAILURE);
                     ctx.pipeline().remove(this);
@@ -143,16 +148,21 @@ public class Http3NettyClient {
         private final Http3Config config;
         private final Map<Long, ChannelPromise> streamResponseMap;
         private final AtomicLong lastStreamId;
+        private final InetSocketAddress localAddr;
+        private final InetSocketAddress peerAddr;
 
         ChannelHandlerContext context;
         Http3Connection http3Connection;
         Http3EventListener listener;
 
-        HttpOverQuicHandler(Connection connection, Http3Config config) {
+        HttpOverQuicHandler(Connection connection, Http3Config config,
+                InetSocketAddress localAddr, InetSocketAddress peerAddr) {
             this.connection = connection;
             this.config = config;
             this.streamResponseMap = PlatformDependent.newConcurrentHashMap();
             this.lastStreamId = new AtomicLong(0);
+            this.localAddr = localAddr;
+            this.peerAddr = peerAddr;
         }
 
         @Override
@@ -245,7 +255,7 @@ public class Http3NettyClient {
                 if (content.readableBytes() > 0) {
                     final byte[] buf = new byte[content.readableBytes()];
                     content.readBytes(buf);
-                    final int read = this.connection.recv(buf);
+                    final int read = this.connection.recv(buf, this.peerAddr, this.localAddr);
                     if (read > 0) {
                         while(true) {
                             final long streamId = http3Connection.poll(this.listener);
@@ -337,9 +347,12 @@ public class Http3NettyClient {
         @Override
         protected void initChannel(DatagramChannel ch) throws ConnectionFailureException {
             final byte[] connId = Quiche.newConnectionId();
-            final Connection conn = Quiche.connect(this.domain, connId, this.config);
-            this.handshaker = new QuicHandshakeHandler(conn, ch.newPromise());
-            this.httpHandler = new HttpOverQuicHandler(conn, http3config);
+            final InetSocketAddress localAddr = (InetSocketAddress) ch.localAddress();
+            // localAddress may be null before bind, use a fallback
+            final InetSocketAddress effectiveLocalAddr = localAddr != null ? localAddr : new InetSocketAddress("0.0.0.0", 0);
+            final Connection conn = Quiche.connect(this.domain, connId, this.config, effectiveLocalAddr, this.recipient);
+            this.handshaker = new QuicHandshakeHandler(conn, ch.newPromise(), effectiveLocalAddr, this.recipient);
+            this.httpHandler = new HttpOverQuicHandler(conn, http3config, effectiveLocalAddr, this.recipient);
 
             ch.pipeline().addLast(
                 new DatagramEncoder(recipient),

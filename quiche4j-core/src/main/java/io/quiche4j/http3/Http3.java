@@ -8,7 +8,7 @@ public final class Http3 {
      * <p>This can be passed directly to the {@link ConfigBuilder#withApplicationProtos}
      * method when implementing HTTP/3 applications.
      */
-    public static final byte[] APPLICATION_PROTOCOL = "\u0005h3-29\u0005h3-28\u0005h3-27".getBytes();
+    public static final byte[] APPLICATION_PROTOCOL = "\u0002h3".getBytes();
 
     /**
      * A listing of HTTP3 error codes.
@@ -83,6 +83,41 @@ public final class Http3 {
          * for the operation to complete. The application should retry later on.
          */
         public static final short STREAM_BLOCKED = -13;
+
+        /**
+         * Error in the payload of a SETTINGS frame.
+         */
+        public static final short SETTINGS_ERROR = -14;
+
+        /**
+         * Server rejected request.
+         */
+        public static final short REQUEST_REJECTED = -15;
+
+        /**
+         * Request or its response cancelled.
+         */
+        public static final short REQUEST_CANCELLED = -16;
+
+        /**
+         * Client's request stream terminated without a full-formed request.
+         */
+        public static final short REQUEST_INCOMPLETE = -17;
+
+        /**
+         * An HTTP message was malformed and cannot be processed.
+         */
+        public static final short MESSAGE_ERROR = -18;
+
+        /**
+         * The TCP connection established in response to a CONNECT request was reset.
+         */
+        public static final short CONNECT_ERROR = -19;
+
+        /**
+         * The requested operation cannot be served over HTTP/3.
+         */
+        public static final short VERSION_FALLBACK = -20;
     }
 
 }

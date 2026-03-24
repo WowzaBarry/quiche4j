@@ -6,27 +6,51 @@ import java.net.URL;
 /**
  * Helper functionality to try to resolve native library from JAR
  * in case when a system dependency is not available.
+ *
+ * Searches for the native library in platform-specific subdirectories first,
+ * then falls back to the flat /native-libs/ directory for backwards compatibility.
+ *
+ * Platform directory layout:
+ *   /native-libs/linux-x86_64/libquiche_jni.so
+ *   /native-libs/linux-aarch64/libquiche_jni.so
+ *   /native-libs/osx-aarch64/libquiche_jni.dylib
+ *   /native-libs/osx-x86_64/libquiche_jni.dylib
+ *   /native-libs/windows-x86_64/libquiche_jni.dll
  */
 public final class NativeUtils {
 
-    private static final String DEFAUL_DIR = "/native-libs/";
-
-    private static final String[] ALLOWED_EXTENTIONS = new String[]{"so", "dylib", "dll"};
+    private static final String DEFAULT_DIR = "/native-libs/";
 
     public static void loadEmbeddedLibrary(String libname) {
-        loadEmbeddedLibrary(DEFAUL_DIR, libname);
+        loadEmbeddedLibrary(DEFAULT_DIR, libname);
     }
 
     public static void loadEmbeddedLibrary(String dir, String libname) {
         final String filename = "lib" + libname;
+        final String platformDir = detectPlatformDir();
+        final String ext = detectExtension();
 
         String nativeLibraryFilepath = null;
-        for (String ext: ALLOWED_EXTENTIONS) {
-            final String filepath = dir + filename + "." + ext;
+
+        // Try platform-specific subdirectory first
+        if (platformDir != null && ext != null) {
+            final String filepath = dir + platformDir + "/" + filename + "." + ext;
             final URL url = Quiche.class.getResource(filepath);
             if (url != null) {
                 nativeLibraryFilepath = filepath;
-                break;
+            }
+        }
+
+        // Fall back to flat directory (backwards compatibility)
+        if (nativeLibraryFilepath == null) {
+            String[] extensions = new String[]{"so", "dylib", "dll"};
+            for (String e : extensions) {
+                final String filepath = dir + filename + "." + e;
+                final URL url = Quiche.class.getResource(filepath);
+                if (url != null) {
+                    nativeLibraryFilepath = filepath;
+                    break;
+                }
             }
         }
 
@@ -39,5 +63,40 @@ public final class NativeUtils {
                 // no-op
             }
         }
+    }
+
+    private static String detectPlatformDir() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        String arch = System.getProperty("os.arch", "").toLowerCase();
+
+        String osName;
+        if (os.contains("linux")) {
+            osName = "linux";
+        } else if (os.contains("mac") || os.contains("darwin")) {
+            osName = "osx";
+        } else if (os.contains("win")) {
+            osName = "windows";
+        } else {
+            return null;
+        }
+
+        String archName;
+        if (arch.equals("amd64") || arch.equals("x86_64")) {
+            archName = "x86_64";
+        } else if (arch.equals("aarch64") || arch.equals("arm64")) {
+            archName = "aarch64";
+        } else {
+            return null;
+        }
+
+        return osName + "-" + archName;
+    }
+
+    private static String detectExtension() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (os.contains("linux")) return "so";
+        if (os.contains("mac") || os.contains("darwin")) return "dylib";
+        if (os.contains("win")) return "dll";
+        return null;
     }
 }

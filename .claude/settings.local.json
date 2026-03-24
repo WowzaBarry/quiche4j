@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(mvn compile:*)",
+      "Bash(mvn clean:*)",
+      "Bash(mvn install:*)",
+      "Bash(mvn package:*)",
+      "Bash(jar:*)",
+      "Bash(cp:*)"
+    ]
+  }
+}
