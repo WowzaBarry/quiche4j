@@ -133,6 +133,44 @@ pub extern "system" fn Java_io_quiche4j_Native_quiche_1config_1load_1priv_1key_1
 
 #[no_mangle]
 #[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_Native_quiche_1config_1load_1verify_1locations_1from_1file(
+    mut env: JNIEnv,
+    _class: JClass,
+    config_ptr: jlong,
+    path: JString,
+) -> jint {
+    let config = unsafe { &mut *(config_ptr as *mut Config) };
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    match config.load_verify_locations_from_file(&path_str) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_Native_quiche_1config_1load_1verify_1locations_1from_1directory(
+    mut env: JNIEnv,
+    _class: JClass,
+    config_ptr: jlong,
+    path: JString,
+) -> jint {
+    let config = unsafe { &mut *(config_ptr as *mut Config) };
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    match config.load_verify_locations_from_directory(&path_str) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+#[warn(unused_variables)]
 pub extern "system" fn Java_io_quiche4j_Native_quiche_1config_1verify_1peer(
     _env: JNIEnv,
     _class: JClass,
@@ -640,6 +678,75 @@ pub extern "system" fn Java_io_quiche4j_Native_quiche_1conn_1is_1established(
     conn.is_established() as jboolean
 }
 
+/// Returns the peer's certificate chain as a `byte[][]` of DER-encoded X.509 certs.
+///
+/// Returns null (NULL jobject) if no peer certificate is available yet, or a zero-length array
+/// if the peer sent no certificates.
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_Native_quiche_1conn_1peer_1cert_1chain(
+    mut env: JNIEnv,
+    _class: JClass,
+    conn_ptr: jlong,
+) -> jobjectArray {
+    let conn = unsafe { &*(conn_ptr as *mut Connection) };
+    let chain = match conn.peer_cert_chain() {
+        Some(c) => c,
+        None => return std::ptr::null_mut(),
+    };
+    let byte_array_class = match env.find_class("[B") {
+        Ok(c) => c,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let empty = match env.new_byte_array(0) {
+        Ok(a) => a,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let result = match env.new_object_array(chain.len() as i32, &byte_array_class, empty) {
+        Ok(r) => r,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    for (i, cert) in chain.iter().enumerate() {
+        let arr = match env.new_byte_array(cert.len() as i32) {
+            Ok(a) => a,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let signed: &[i8] = unsafe {
+            std::slice::from_raw_parts(cert.as_ptr() as *const i8, cert.len())
+        };
+        if env.set_byte_array_region(&arr, 0, signed).is_err() {
+            return std::ptr::null_mut();
+        }
+        if env.set_object_array_element(&result, i as i32, &arr).is_err() {
+            return std::ptr::null_mut();
+        }
+    }
+    result.into_raw()
+}
+
+/// Returns the ALPN value negotiated by the peer (empty if none).
+#[no_mangle]
+#[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_Native_quiche_1conn_1application_1proto(
+    mut env: JNIEnv,
+    _class: JClass,
+    conn_ptr: jlong,
+) -> jbyteArray {
+    let conn = unsafe { &*(conn_ptr as *mut Connection) };
+    let proto = conn.application_proto();
+    let arr = match env.new_byte_array(proto.len() as i32) {
+        Ok(a) => a,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let signed: &[i8] = unsafe {
+        std::slice::from_raw_parts(proto.as_ptr() as *const i8, proto.len())
+    };
+    if env.set_byte_array_region(&arr, 0, signed).is_err() {
+        return std::ptr::null_mut();
+    }
+    arr.into_raw()
+}
+
 #[no_mangle]
 #[warn(unused_variables)]
 pub extern "system" fn Java_io_quiche4j_Native_quiche_1conn_1is_1in_1early_1data(
@@ -946,11 +1053,14 @@ pub extern "system" fn Java_io_quiche4j_http3_Http3Native_quiche_1h3_1send_1requ
     conn_ptr: jlong,
     headers: jobjectArray,
     fin: jboolean,
-) {
+) -> jlong {
     let h3_conn = unsafe { &mut *(h3_ptr as *mut h3::Connection) };
     let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
     let req = headers_from_java(&mut env, headers).unwrap();
-    h3_conn.send_request(conn, &req, fin != 0).unwrap();
+    match h3_conn.send_request(conn, &req, fin != 0) {
+        Ok(stream_id) => stream_id as jlong,
+        Err(e) => h3_error_code(e) as jlong,
+    }
 }
 
 #[no_mangle]
