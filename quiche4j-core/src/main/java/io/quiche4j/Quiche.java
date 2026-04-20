@@ -134,6 +134,82 @@ public final class Quiche {
          * The peer sent more data in CRYPTO frames than we can buffer.
          */
         public static final short CRYPTO_BUFFER_EXCEEDED = -20;
+
+        /**
+         * The peer sent an ACK frame with an invalid range.
+         */
+        public static final short INVALID_ACK_RANGE = -21;
+
+        /**
+         * The peer is acknowledging packets that haven't been sent yet.
+         */
+        public static final short OPTIMISTIC_ACK_DETECTED = -22;
+
+        /**
+         * The peer's first flight used an invalid destination connection ID.
+         */
+        public static final short INVALID_DCID_INITIALIZATION = -23;
+
+        /**
+         * Lower bound on native error codes. Values in {@code [MIN_ERROR_CODE, 0]} are
+         * interpreted as error sentinels rather than native pointers.
+         *
+         * <p>Native constructors return the error code as a {@code jlong} from the
+         * same slot that, on success, carries a {@code Box::into_raw} heap pointer.
+         * Treating every negative {@code jlong} as an error is unsafe on platforms
+         * where pointers can have bit 63 set (e.g. Android arm64 with MTE tagging
+         * via Scudo). Since {@code error_to_c} currently only emits values down to
+         * {@code -23}, pointers will never fall into {@code [-100, 0]}; we use this
+         * constant rather than the exact tightest bound to leave room for new quiche
+         * error variants without requiring a simultaneous Java-side update.
+         */
+        public static final long MIN_ERROR_CODE = -100L;
+
+        /**
+         * Returns {@code true} if the given native return value should be treated as
+         * an error rather than a valid pointer. See {@link #MIN_ERROR_CODE} for why
+         * a bare {@code ptr <= 0} check is unsafe on Android arm64.
+         */
+        public static boolean isErrorCode(long code) {
+            return code == 0L || (code < 0L && code > MIN_ERROR_CODE);
+        }
+
+        /**
+         * Returns the symbolic name for a native error code, or {@code "UNKNOWN"}
+         * if the code is not recognised.
+         *
+         * <p>Useful for error messages, logging, and exception text:
+         * <pre>
+         *     Quiche.ErrorCode.name(-10) // returns "TLS_FAIL"
+         * </pre>
+         */
+        public static String name(long code) {
+            if (code == SUCCESS) return "SUCCESS";
+            if (code == DONE) return "DONE";
+            if (code == BUFFER_TOO_SHORT) return "BUFFER_TOO_SHORT";
+            if (code == UNKNOWN_VERSION) return "UNKNOWN_VERSION";
+            if (code == INVALID_FRAME) return "INVALID_FRAME";
+            if (code == INVALID_PACKET) return "INVALID_PACKET";
+            if (code == INVALID_STATE) return "INVALID_STATE";
+            if (code == INVALID_STREAM_STATE) return "INVALID_STREAM_STATE";
+            if (code == INVALID_TRANSPORT_PARAM) return "INVALID_TRANSPORT_PARAM";
+            if (code == CRYPTO_FAIL) return "CRYPTO_FAIL";
+            if (code == TLS_FAIL) return "TLS_FAIL";
+            if (code == FLOW_CONTROL) return "FLOW_CONTROL";
+            if (code == STREAM_LIMIT) return "STREAM_LIMIT";
+            if (code == FINAL_SIZE) return "FINAL_SIZE";
+            if (code == CONGESTION_CONTROL) return "CONGESTION_CONTROL";
+            if (code == STREAM_STOPPED) return "STREAM_STOPPED";
+            if (code == STREAM_RESET) return "STREAM_RESET";
+            if (code == ID_LIMIT) return "ID_LIMIT";
+            if (code == OUT_OF_IDENTIFIERS) return "OUT_OF_IDENTIFIERS";
+            if (code == KEY_UPDATE) return "KEY_UPDATE";
+            if (code == CRYPTO_BUFFER_EXCEEDED) return "CRYPTO_BUFFER_EXCEEDED";
+            if (code == INVALID_ACK_RANGE) return "INVALID_ACK_RANGE";
+            if (code == OPTIMISTIC_ACK_DETECTED) return "OPTIMISTIC_ACK_DETECTED";
+            if (code == INVALID_DCID_INITIALIZATION) return "INVALID_DCID_INITIALIZATION";
+            return "UNKNOWN";
+        }
     }
 
     /**
@@ -272,7 +348,7 @@ public final class Quiche {
         final long ptr = Native.quiche_accept(sourceConnId, originalDestinationConnId, config.getPointer(),
             localAddr.getAddress().getAddress(), localAddr.getPort(),
             peerAddr.getAddress().getAddress(), peerAddr.getPort());
-        if (ptr <= ErrorCode.SUCCESS) {
+        if (ErrorCode.isErrorCode(ptr)) {
             throw new ConnectionFailureException(ptr);
         }
         return Connection.newInstance(ptr);
@@ -292,7 +368,7 @@ public final class Quiche {
         final long ptr = Native.quiche_connect(serverName, connId, config.getPointer(),
             localAddr.getAddress().getAddress(), localAddr.getPort(),
             peerAddr.getAddress().getAddress(), peerAddr.getPort());
-        if (ptr <= ErrorCode.SUCCESS) {
+        if (ErrorCode.isErrorCode(ptr)) {
             throw new ConnectionFailureException(ptr);
         }
         return Connection.newInstance(ptr);

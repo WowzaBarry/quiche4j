@@ -26,6 +26,20 @@ public final class NativeUtils {
     }
 
     public static void loadEmbeddedLibrary(String dir, String libname) {
+        // On Android, the JNI .so is expected to be packaged into the APK's
+        // lib/<abi>/ directory by the Android Gradle Plugin. Java's
+        // System.loadLibrary resolves it directly from there; if it didn't,
+        // there is no useful JAR-extraction fallback — Android's app classpath
+        // is not a conventional JAR tree and the temp-file dance below would
+        // either silently no-op or crash with an opaque IOException. Fail fast
+        // with a message that tells the caller where to look.
+        if (isAndroid()) {
+            throw new UnsatisfiedLinkError(
+                "lib" + libname + " not found via System.loadLibrary on Android. "
+                + "Ensure the quiche4j-jni artifact is packaged so the native "
+                + "library ends up in the APK's lib/<abi>/ directory.");
+        }
+
         final String filename = "lib" + libname;
         final String platformDir = detectPlatformDir();
         final String ext = detectExtension();
@@ -63,6 +77,16 @@ public final class NativeUtils {
                 // no-op
             }
         }
+    }
+
+    private static boolean isAndroid() {
+        // The Android runtime sets java.vm.vendor to "The Android Project" and
+        // exposes java.vendor as "The Android Project" as well; java.runtime.name
+        // on Android is "Android Runtime". Checking any of these works; the
+        // vendor property is the traditional choice.
+        return "The Android Project".equals(System.getProperty("java.vm.vendor"))
+            || System.getProperty("java.vendor", "").toLowerCase().contains("android")
+            || System.getProperty("java.runtime.name", "").toLowerCase().contains("android");
     }
 
     private static String detectPlatformDir() {

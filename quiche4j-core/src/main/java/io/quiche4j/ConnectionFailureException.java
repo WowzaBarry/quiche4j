@@ -17,7 +17,7 @@ public final class ConnectionFailureException extends IOException {
     private final long errorCode;
 
     public ConnectionFailureException(long errorCode) {
-        super();
+        super("quiche connection failed: " + Quiche.ErrorCode.name(errorCode) + " (" + errorCode + ")");
         this.errorCode = errorCode;
     }
 
