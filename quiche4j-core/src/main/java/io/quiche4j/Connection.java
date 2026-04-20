@@ -148,6 +148,29 @@ public class Connection {
     }
 
     /**
+     * Returns the peer's DER-encoded X.509 certificate chain, or {@code null} if no
+     * peer certificate is available yet (for example, the handshake has not completed
+     * or the peer did not authenticate).
+     *
+     * <p>The returned array has one entry per certificate, starting with the leaf
+     * certificate. Each entry is a DER-encoded X.509 certificate suitable for
+     * consumption by {@link java.security.cert.CertificateFactory}.
+     */
+    public final byte[][] peerCertificateChain() {
+        return Native.quiche_conn_peer_cert_chain(getPointer());
+    }
+
+    /**
+     * Returns the ALPN protocol negotiated with the peer.
+     *
+     * <p>Returns an empty byte array if no protocol has been negotiated yet (for example,
+     * before the handshake has completed). For HTTP/3 this is typically {@code "h3"}.
+     */
+    public final byte[] applicationProto() {
+        return Native.quiche_conn_application_proto(getPointer());
+    }
+
+    /**
      * @see Connection#close(boolean, long, byte[])
      */
     public final int close(boolean app, long error, String reason) {
