@@ -75,6 +75,9 @@ public final class Native {
 
 	public final static native void quiche_config_enable_hystart(long config_ptr, boolean v);
 
+	public final static native void quiche_config_enable_dgram(long config_ptr, boolean enabled,
+		long recvQueueLen, long sendQueueLen);
+
 	public final static native long quiche_config_free(long config_ptr);
 
 	// CONNECTION
