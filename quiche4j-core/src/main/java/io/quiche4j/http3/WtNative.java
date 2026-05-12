@@ -29,6 +29,19 @@ public class WtNative {
 
     public final static native long wt_server_stream_send(long conn_ptr, long stream_id, byte[] buf, boolean fin);
 
-    public final static native int wt_server_stream_recv(long conn_ptr, long stream_id, byte[] buf);
+    /**
+     * Read drained WT stream bytes from the native per-stream buffer.
+     * WT payload is drained from quiche during {@code wt_server_poll}, so this
+     * MUST be used instead of {@link io.quiche4j.Native}'s
+     * {@code quiche_conn_stream_recv} for WT data streams.
+     * Returns bytes copied into {@code buf}, or 0 if buffer is empty.
+     */
+    public final static native int wt_server_stream_recv(long wt_ptr, long stream_id, byte[] buf);
+
+    /**
+     * @return true if FIN has been observed on the stream and its drain buffer
+     *         is empty.
+     */
+    public final static native boolean wt_server_stream_fin_reached(long wt_ptr, long stream_id);
 
 }

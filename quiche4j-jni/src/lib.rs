@@ -356,6 +356,20 @@ pub extern "system" fn Java_io_quiche4j_Native_quiche_1config_1enable_1hystart(
 
 #[no_mangle]
 #[warn(unused_variables)]
+pub extern "system" fn Java_io_quiche4j_Native_quiche_1config_1enable_1dgram(
+    _env: JNIEnv,
+    _class: JClass,
+    config_ptr: jlong,
+    enabled: jboolean,
+    recv_queue_len: jlong,
+    send_queue_len: jlong,
+) {
+    let config = unsafe { &mut *(config_ptr as *mut Config) };
+    config.enable_dgram(enabled != 0, recv_queue_len as usize, send_queue_len as usize);
+}
+
+#[no_mangle]
+#[warn(unused_variables)]
 pub extern "system" fn Java_io_quiche4j_Native_quiche_1accept(
     mut env: JNIEnv,
     _class: JClass,
@@ -1402,26 +1416,41 @@ pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1stream_1send(
     }
 }
 
+/// Read previously-drained WT stream bytes from the WtServer's internal
+/// per-stream buffer. WT data is drained out of quiche during `wt_server_poll`
+/// so quiche-h3 can't consume it as HTTP/3 frames; callers must use this
+/// rather than `Connection::stream_recv` for WT data streams.
 #[no_mangle]
 pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1stream_1recv(
     mut env: JNIEnv,
     _class: JClass,
-    conn_ptr: jlong,
+    wt_ptr: jlong,
     stream_id: jlong,
     java_buf: jbyteArray,
 ) -> jint {
-    let conn = unsafe { &mut *(conn_ptr as *mut Connection) };
+    let wt = unsafe { &mut *(wt_ptr as *mut WtServer) };
     let buf_ref = unsafe { JByteArray::from_raw(java_buf) };
     let buf_len = env.get_array_length(&buf_ref).unwrap() as usize;
     let mut buf = vec![0u8; buf_len];
-    match conn.stream_recv(stream_id as u64, &mut buf) {
-        Ok((out_len, _fin)) => {
-            env.set_byte_array_region(&buf_ref, 0, unsafe {
-                slice::from_raw_parts(buf.as_ptr() as *const i8, out_len)
-            })
-            .unwrap();
-            out_len as jint
-        }
-        Err(e) => error_to_c(e),
+    let n = wt.stream_recv(stream_id as u64, &mut buf);
+    if n > 0 {
+        env.set_byte_array_region(&buf_ref, 0, unsafe {
+            slice::from_raw_parts(buf.as_ptr() as *const i8, n)
+        })
+        .unwrap();
     }
+    n as jint
+}
+
+/// Returns 1 if FIN has been observed on the stream and the buffer is empty,
+/// 0 otherwise.
+#[no_mangle]
+pub extern "system" fn Java_io_quiche4j_http3_WtNative_wt_1server_1stream_1fin_1reached(
+    _env: JNIEnv,
+    _class: JClass,
+    wt_ptr: jlong,
+    stream_id: jlong,
+) -> jboolean {
+    let wt = unsafe { &mut *(wt_ptr as *mut WtServer) };
+    if wt.stream_fin_reached(stream_id as u64) { 1 } else { 0 }
 }

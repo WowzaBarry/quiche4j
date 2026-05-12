@@ -49,6 +49,7 @@ pub enum WtEvent {
 }
 
 /// State for a single WT stream being parsed.
+#[derive(Clone, Copy)]
 enum StreamParseState {
     /// Waiting for the stream type prefix byte(s).
     AwaitingType,
@@ -66,6 +67,19 @@ pub struct WtServer {
     sessions: HashMap<u64, u64>,
     /// Partial read buffers for streams still being classified.
     parse_bufs: HashMap<u64, Vec<u8>>,
+    /// Drained payload bytes for classified WT streams. We pull data out of
+    /// quiche in Phase 1 of `poll` so quiche-h3 (Phase 2) can never consume
+    /// MoQ payload bytes on a client-bidi stream — h3 would otherwise treat
+    /// it as `Type::Request` / `State::FrameType` and parse our payload as
+    /// HTTP/3 frames.
+    stream_data: HashMap<u64, Vec<u8>>,
+    /// Whether each Ready stream has reached FIN (after draining).
+    /// We emit `WtEvent::Finished` exactly once per stream when its buffer
+    /// drains empty after FIN was observed.
+    stream_fin: HashMap<u64, bool>,
+    /// Streams whose FIN was already reported via `WtEvent::Finished`,
+    /// kept so we never report twice and so we can ignore stale h3 events.
+    finished_reported: HashMap<u64, bool>,
 }
 
 impl WtServer {
@@ -74,6 +88,9 @@ impl WtServer {
             streams: HashMap::new(),
             sessions: HashMap::new(),
             parse_bufs: HashMap::new(),
+            stream_data: HashMap::new(),
+            stream_fin: HashMap::new(),
+            finished_reported: HashMap::new(),
         }
     }
 
@@ -90,24 +107,32 @@ impl WtServer {
     ) -> Vec<WtEvent> {
         let mut events = Vec::new();
 
-        // Phase 1: Classify readable streams
+        // Phase 1: Classify readable streams and drain WT payload.
+        //
+        // Critical: we must drain bytes from any classified WT stream BEFORE
+        // calling h3_conn.poll. quiche-h3 auto-classifies client-bidi streams
+        // (ID % 4 == 0) as Type::Request / State::FrameType and would happily
+        // call conn.stream_recv on them, eating our MoQ payload as if it were
+        // an HTTP/3 frame type+length pair.
         let readable: Vec<u64> = conn.readable().collect();
         for stream_id in readable {
-            // Skip streams managed by h3 (control streams, QPACK, request streams)
-            // Client-initiated bidi streams with IDs 0,4,8... could be h3 request streams.
-            // Client-initiated uni streams with IDs 2,6,10... could be h3 control/QPACK.
-            // We only intercept streams that we've started tracking as WT,
-            // or new client-initiated streams that might have a WT prefix.
-            if let Some(state) = self.streams.get(&stream_id) {
+            if let Some(state) = self.streams.get(&stream_id).copied() {
                 match state {
                     StreamParseState::Ready { .. } => {
-                        // Already classified — just report data available
-                        events.push(WtEvent::Data { stream_id });
+                        // Already classified — drain into our buffer so h3.poll
+                        // can't see any of these bytes.
+                        if self.drain_stream(conn, stream_id) {
+                            events.push(WtEvent::Data { stream_id });
+                        }
                     }
                     _ => {
-                        // Still parsing prefix — try to advance
+                        // Still parsing prefix — try to advance, then drain
+                        // any payload that follows the prefix.
                         if let Some(evt) = self.try_parse_prefix(conn, stream_id) {
                             events.push(evt);
+                            // After try_parse_prefix returns NewStream, the
+                            // stream is now Ready. Drain leftover payload.
+                            self.drain_stream(conn, stream_id);
                         }
                     }
                 }
@@ -126,15 +151,22 @@ impl WtServer {
                 self.parse_bufs.insert(stream_id, Vec::new());
                 if let Some(evt) = self.try_parse_prefix(conn, stream_id) {
                     events.push(evt);
+                    self.drain_stream(conn, stream_id);
                 }
             }
             // Otherwise, let h3 handle it in phase 2
         }
 
-        // Phase 2: Poll h3 for standard events
+        // Phase 2: Poll h3 for standard events. Suppress events for any stream
+        // we've classified as a WT data stream — h3 may still have stream
+        // state for it (it auto-creates a Type::Request entry on first read),
+        // and we don't want to surface those phantom events to the caller.
         loop {
             match h3_conn.poll(conn) {
                 Ok((stream_id, h3::Event::Headers { list, more_frames })) => {
+                    if self.is_wt_classified(stream_id) {
+                        continue;
+                    }
                     // Check if this is an Extended CONNECT for WebTransport
                     if self.is_webtransport_connect(&list) {
                         let path = self.extract_path(&list);
@@ -162,9 +194,15 @@ impl WtServer {
                     }
                 }
                 Ok((stream_id, h3::Event::Data)) => {
+                    if self.is_wt_classified(stream_id) {
+                        continue;
+                    }
                     events.push(WtEvent::H3Data { stream_id });
                 }
                 Ok((stream_id, h3::Event::Finished)) => {
+                    if self.is_wt_classified(stream_id) {
+                        continue;
+                    }
                     // Check if this is a WT session being closed
                     if self.sessions.contains_key(&stream_id) {
                         // Session's CONNECT stream finished — session ends
@@ -182,16 +220,99 @@ impl WtServer {
             }
         }
 
-        // Phase 3: Check for FIN on classified WT streams
-        for (&stream_id, state) in &self.streams {
-            if let StreamParseState::Ready { .. } = state {
-                if conn.stream_finished(stream_id) {
-                    events.push(WtEvent::Finished { stream_id });
-                }
-            }
+        // Phase 3: Emit Finished for classified WT streams whose buffer has
+        // drained empty after FIN was observed. We track FIN locally because
+        // the bytes are consumed by drain_stream before h3 ever sees them.
+        let fin_streams: Vec<u64> = self.stream_fin.iter()
+            .filter_map(|(&sid, &fin)| {
+                if !fin { return None; }
+                if self.finished_reported.get(&sid).copied().unwrap_or(false) { return None; }
+                let buf_empty = self.stream_data.get(&sid).map_or(true, |b| b.is_empty());
+                if buf_empty { Some(sid) } else { None }
+            })
+            .collect();
+        for sid in fin_streams {
+            self.finished_reported.insert(sid, true);
+            events.push(WtEvent::Finished { stream_id: sid });
         }
 
         events
+    }
+
+    fn is_wt_classified(&self, stream_id: u64) -> bool {
+        matches!(
+            self.streams.get(&stream_id),
+            Some(StreamParseState::Ready { .. })
+        )
+    }
+
+    /// Drain all readable bytes from a Ready WT stream into our internal
+    /// `stream_data` buffer. Track FIN in `stream_fin`. Returns true if any
+    /// bytes were read (so the caller can emit `WtEvent::Data`).
+    fn drain_stream(&mut self, conn: &mut Connection, stream_id: u64) -> bool {
+        // Don't drain if we haven't fully classified the stream — try_parse_prefix
+        // owns reads until it produces a Ready state.
+        if !matches!(
+            self.streams.get(&stream_id),
+            Some(StreamParseState::Ready { .. })
+        ) {
+            return false;
+        }
+        let mut tmp = [0u8; 4096];
+        let mut got_data = false;
+        loop {
+            match conn.stream_recv(stream_id, &mut tmp) {
+                Ok((n, fin)) => {
+                    if n > 0 {
+                        self.stream_data
+                            .entry(stream_id)
+                            .or_default()
+                            .extend_from_slice(&tmp[..n]);
+                        got_data = true;
+                    }
+                    if fin {
+                        self.stream_fin.insert(stream_id, true);
+                        break;
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                Err(quiche::Error::Done) => break,
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+        got_data
+    }
+
+    /// Read previously-drained bytes from the per-stream buffer. Returns the
+    /// number of bytes copied into `out` (0 if buffer empty).
+    /// Use `stream_fin_reached` to detect FIN once buffer is empty.
+    pub fn stream_recv(&mut self, stream_id: u64, out: &mut [u8]) -> usize {
+        let buf = match self.stream_data.get_mut(&stream_id) {
+            Some(b) => b,
+            None => return 0,
+        };
+        let n = std::cmp::min(buf.len(), out.len());
+        if n == 0 {
+            return 0;
+        }
+        out[..n].copy_from_slice(&buf[..n]);
+        buf.drain(..n);
+        n
+    }
+
+    /// Returns true if FIN has been observed on this stream and all buffered
+    /// bytes have been consumed via `stream_recv`.
+    pub fn stream_fin_reached(&self, stream_id: u64) -> bool {
+        if !self.stream_fin.get(&stream_id).copied().unwrap_or(false) {
+            return false;
+        }
+        self.stream_data
+            .get(&stream_id)
+            .map_or(true, |b| b.is_empty())
     }
 
     /// Open a server-initiated WT unidirectional stream for the given session.
@@ -262,6 +383,9 @@ impl WtServer {
     pub fn remove_stream(&mut self, stream_id: u64) {
         self.streams.remove(&stream_id);
         self.parse_bufs.remove(&stream_id);
+        self.stream_data.remove(&stream_id);
+        self.stream_fin.remove(&stream_id);
+        self.finished_reported.remove(&stream_id);
     }
 
     // --- Internal helpers ---
@@ -277,92 +401,129 @@ impl WtServer {
     }
 
     /// Try to read and parse the WT stream type prefix from a stream.
+    ///
+    /// Critical invariant: only consume the prefix bytes from the QUIC stream.
+    /// Any post-prefix payload bytes must remain in conn so the caller can read
+    /// them via `conn.stream_recv`. We use `parse_bufs` only to stash partial
+    /// varint bytes when a prefix is split across QUIC packets.
     fn try_parse_prefix(
         &mut self,
         conn: &mut Connection,
         stream_id: u64,
     ) -> Option<WtEvent> {
-        // Read available bytes
-        let mut tmp = [0u8; 32];
         loop {
-            match conn.stream_recv(stream_id, &mut tmp) {
-                Ok((n, _fin)) => {
-                    if n == 0 { break; }
-                    if let Some(buf) = self.parse_bufs.get_mut(&stream_id) {
-                        buf.extend_from_slice(&tmp[..n]);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+            // Read state by value so we don't hold a borrow on self.streams
+            // across the read_varint_incremental call (which mutates parse_bufs).
+            let state = match self.streams.get(&stream_id) {
+                Some(StreamParseState::AwaitingType) => StreamParseState::AwaitingType,
+                Some(StreamParseState::AwaitingSessionId { bidi }) =>
+                    StreamParseState::AwaitingSessionId { bidi: *bidi },
+                Some(StreamParseState::Ready { .. }) | None => return None,
+            };
 
-        let buf = self.parse_bufs.get(&stream_id)?;
-        if buf.is_empty() {
-            return None;
-        }
-
-        let state = self.streams.get(&stream_id)?;
-        match state {
-            StreamParseState::AwaitingType => {
-                // Try to decode varint for stream type
-                if let Some((type_val, consumed)) = decode_varint(buf) {
-                    let bidi = match type_val {
+            match state {
+                StreamParseState::AwaitingType => {
+                    let val = self.read_varint_incremental(conn, stream_id)?;
+                    let bidi = match val {
                         WT_STREAM_TYPE_BIDI => true,
                         WT_STREAM_TYPE_UNI => false,
                         _ => {
-                            // Not a WT stream — remove from tracking
-                            // The bytes are already consumed, so h3 can't recover them.
-                            // This is the risk noted in the plan.
+                            // Not a WT stream — drop tracking. The type-varint bytes
+                            // are already consumed from conn; h3 cannot recover them.
                             self.streams.remove(&stream_id);
                             self.parse_bufs.remove(&stream_id);
                             return None;
                         }
                     };
-
-                    // Advance buffer past the type varint
-                    let remaining = buf[consumed..].to_vec();
-                    self.parse_bufs.insert(stream_id, remaining.clone());
                     self.streams.insert(stream_id, StreamParseState::AwaitingSessionId { bidi });
-
-                    // Try to also parse the session ID
-                    if let Some((session_id, consumed2)) = decode_varint(&remaining) {
-                        let leftover = remaining[consumed2..].to_vec();
-                        self.parse_bufs.insert(stream_id, leftover);
-                        self.streams.insert(
-                            stream_id,
-                            StreamParseState::Ready { session_id, bidi },
-                        );
-                        return Some(WtEvent::NewStream {
-                            session_id,
-                            stream_id,
-                            bidi,
-                        });
-                    }
+                    // Loop and try to parse the session ID (it may be in the same packet,
+                    // or stream_recv will return Done and we'll bail until next poll).
                 }
-                None
-            }
-            StreamParseState::AwaitingSessionId { bidi } => {
-                let bidi = *bidi;
-                if let Some((session_id, consumed)) = decode_varint(buf) {
-                    let leftover = buf[consumed..].to_vec();
-                    self.parse_bufs.insert(stream_id, leftover);
+                StreamParseState::AwaitingSessionId { bidi } => {
+                    let session_id = self.read_varint_incremental(conn, stream_id)?;
                     self.streams.insert(
                         stream_id,
                         StreamParseState::Ready { session_id, bidi },
                     );
+                    // parse_bufs for this stream should be empty now; remove the entry
+                    // so future `conn.stream_recv` calls go straight through.
+                    self.parse_bufs.remove(&stream_id);
                     return Some(WtEvent::NewStream {
                         session_id,
                         stream_id,
                         bidi,
                     });
                 }
-                None
-            }
-            StreamParseState::Ready { .. } => {
-                // Already classified, shouldn't be called
-                None
+                StreamParseState::Ready { .. } => return None,
             }
         }
+    }
+
+    /// Read exactly one QUIC varint from a stream, consuming only its bytes.
+    /// Uses `parse_bufs[stream_id]` to stash partial bytes across calls when the
+    /// varint is split across packets. Returns Some(value) when complete, None
+    /// when more bytes are needed (and partial bytes are saved for next time).
+    fn read_varint_incremental(
+        &mut self,
+        conn: &mut Connection,
+        stream_id: u64,
+    ) -> Option<u64> {
+        // Pull any previously-buffered partial bytes out of parse_bufs.
+        let mut accum = self.parse_bufs.remove(&stream_id).unwrap_or_default();
+
+        // Step 1: ensure we have the leading byte to determine total varint length.
+        if accum.is_empty() {
+            let mut first = [0u8; 1];
+            match conn.stream_recv(stream_id, &mut first) {
+                Ok((1, _)) => {
+                    accum.push(first[0]);
+                }
+                Ok(_) => {
+                    return None;
+                }
+                Err(_) => {
+                    return None;
+                }
+            }
+        }
+
+        let len = 1usize << ((accum[0] >> 6) as usize);
+
+        // Step 2: read the remaining length bytes (one syscall per attempt is fine —
+        // QUIC streams will deliver everything available in a single call up to N).
+        while accum.len() < len {
+            let need = len - accum.len();
+            let mut tmp = vec![0u8; need];
+            match conn.stream_recv(stream_id, &mut tmp) {
+                Ok((n, _)) if n > 0 => {
+                    accum.extend_from_slice(&tmp[..n]);
+                }
+                Ok(_) => {
+                    self.parse_bufs.insert(stream_id, accum);
+                    return None;
+                }
+                Err(_) => {
+                    self.parse_bufs.insert(stream_id, accum);
+                    return None;
+                }
+            }
+        }
+
+        // Step 3: decode.
+        let mut val = (accum[0] & 0x3f) as u64;
+        for i in 1..len {
+            val = (val << 8) | (accum[i] as u64);
+        }
+
+        // Step 4: drain consumed bytes. accum should be exactly `len` bytes here,
+        // but be defensive: if we somehow over-read, keep the leftover for the
+        // next varint (shouldn't happen with the per-byte/exact-len reads above).
+        accum.drain(..len);
+        if !accum.is_empty() {
+            self.parse_bufs.insert(stream_id, accum);
+        }
+
+        Some(val)
     }
 
     fn is_webtransport_connect(&self, headers: &[h3::Header]) -> bool {

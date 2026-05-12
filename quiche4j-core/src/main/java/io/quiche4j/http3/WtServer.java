@@ -68,11 +68,23 @@ public final class WtServer {
     }
 
     /**
-     * Receive data from a WT stream into the provided buffer.
-     * Returns bytes read, or negative error code.
+     * Read drained WT stream bytes from the WtServer's internal per-stream
+     * buffer. WT payload is pulled out of quiche during {@link #poll} so
+     * quiche-h3 cannot consume it as HTTP/3 frames; callers must use this
+     * (not {@code Connection.streamRecv}) for WT data streams.
+     *
+     * @return bytes copied into {@code buf}; 0 when the buffer is empty.
      */
-    public int streamRecv(Connection conn, long streamId, byte[] buf) {
-        return WtNative.wt_server_stream_recv(conn.getPointer(), streamId, buf);
+    public int streamRecv(long streamId, byte[] buf) {
+        return WtNative.wt_server_stream_recv(ptr, streamId, buf);
+    }
+
+    /**
+     * @return true if FIN was observed on the stream and the drain buffer is
+     *         empty (i.e. all bytes have been read by the caller).
+     */
+    public boolean streamFinReached(long streamId) {
+        return WtNative.wt_server_stream_fin_reached(ptr, streamId);
     }
 
 }

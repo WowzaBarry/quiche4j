@@ -11,6 +11,9 @@ public final class ConfigBuilder {
     private Boolean grease;
     private boolean enableEarlyData = false;
     private Boolean enableHystart;
+    private Boolean enableDgram;
+    private long dgramRecvQueueLen = 1000;
+    private long dgramSendQueueLen = 1000;
     private Long maxIdleTimeout;
     private Long maxUdpPayloadSize;
     private Long initialMaxData;
@@ -307,6 +310,20 @@ public final class ConfigBuilder {
     }
 
     /**
+     * Enables QUIC DATAGRAM frames (RFC 9221) and configures internal recv/send
+     * queue depths. Required for HTTP/3 datagrams (RFC 9297) and WebTransport.
+     *
+     * <p>When enabled, the {@code max_datagram_frame_size} transport parameter is
+     * advertised so the peer knows datagrams are supported.
+     */
+    public final ConfigBuilder withEnableDgram(boolean enabled, long recvQueueLen, long sendQueueLen) {
+        this.enableDgram        = enabled;
+        this.dgramRecvQueueLen  = recvQueueLen;
+        this.dgramSendQueueLen  = sendQueueLen;
+        return this;
+    }
+
+    /**
      * Builds {@link Config} object, as effectively immutable.
      * 
      * <p>The configuration itself is a native struct. Java object only maintaince
@@ -342,6 +359,11 @@ public final class ConfigBuilder {
 
         if (null != this.enableHystart) {
             Native.quiche_config_enable_hystart(pointer, this.enableHystart);
+        }
+
+        if (null != this.enableDgram) {
+            Native.quiche_config_enable_dgram(pointer, this.enableDgram,
+                this.dgramRecvQueueLen, this.dgramSendQueueLen);
         }
 
         if (null != this.maxIdleTimeout) {
